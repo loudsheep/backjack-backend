@@ -135,12 +135,23 @@ Wrap all messages in: `{ "action": "Name", "payload": { ... } }`
 | **PlaceBet** | `{ "amount": 50 }` | Bet chips. Valid only in `Betting` phase. |
 | **GameAction** | `{ "action_type": "Hit" }` | Types: `Hit`, `Stand`, `Double`, `Split`. Valid in `Playing` phase. |
 | **Chat** | `{ "message": "Hi" }` | Broadcast text to all players. |
-| **StartGame** | `null` | **(Admin)** Phase: `Lobby` -> `Betting`. |
+| **StartGame** | `null` | **(Admin)** Force start the game or skipped current player turn. |
 | **NextRound** | `null` | **(Admin)** Phase: `Payout` -> `Betting`. |
 | **ApprovePlayer**| `{ "player_id": "..." }` | **(Admin)** Allow a `PendingApproval` player to join. |
 | **KickPlayer** | `{ "player_id": "..." }` | **(Admin)** Remove a player. |
 | **UpdateSettings**| `{ "settings": { ... } }` | **(Admin)** Change rules mid-game. |
 | **AdminUpdateBalance** | `{ "target_id": "...", "change_chips": 500 }` | **(Admin)** Modify player chips (use negative to deduct). |
+
+**Note on Phases:**
+1.  **Lobby**: Players join. Admin starts game (`StartGame`).
+2.  **Betting**: Players place bets (Status -> `Playing`). Non-betters stay `Sitting`.
+    *   System Auto-Start: If **everyone** eligible has bet.
+    *   Admin Force-Start: If some have bet, Admin can `StartGame` to proceed. Non-betters skip the round.
+3.  **Playing**: Players take actions.
+    *   Admin can `StartGame` to force-stand the current player (timeout).
+4.  **DealerTurn**: Automatic.
+5.  **Payout**: Results calculated.
+6.  **NextRound**: Admin resets to `Betting` (`NextRound`).
 
 ---
 
@@ -163,6 +174,9 @@ Sent on **any** change. This is the **entire** state needed to render the game.
   }
 }
 ```
+
+**Hand Status Values:**
+`Playing`, `Stood`, `Busted`, `Blackjack`, `Doubled`, `Won`, `Lost`, `Push`
 
 #### 2. JoinedLobby (Crucial)
 Sent only to YOU after a successful join or reconnect.

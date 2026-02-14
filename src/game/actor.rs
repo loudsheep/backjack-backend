@@ -231,6 +231,9 @@ impl GameActor {
             is_admin: is_first,
         });
 
+        // If game is in lobby, just broadcast join
+        // If game is in progress (Betting, Playing, Payout), newcomer is Spectating
+        // but state should reflect that. Current implementation defaults to Spectating which is correct.
         self.broadcast_state();
     }
 
@@ -384,15 +387,32 @@ impl GameActor {
             });
             return;
         }
-        if self.phase == GamePhase::Lobby {
-            self.start_betting_phase();
-        } else if self.phase == GamePhase::Betting {
-             self.start_action_phase();
-        } else {
-            self.broadcast(ServerMessage::Error {
-                msg: "Game can only be started from the Lobby or Betting phase.".to_string(),
-            });
+
+        match self.phase {
+            GamePhase::Lobby => self.start_betting_phase(),
+            GamePhase::Betting => self.start_action_phase(),
+            GamePhase::Playing => {
+                // Admin force skip current player
+                self.force_stand_current_player();
+            }
+            _ => {
+                self.broadcast(ServerMessage::Error {
+                    msg: "Invalid phase for StartGame command.".to_string(),
+                });
+            }
         }
+    }
+
+    fn force_stand_current_player(&mut self) {
+        if let Some(player) = self.players.get_mut(self.turn_index) {
+            // Mark all active hands as Stood
+            for hand in player.hands.iter_mut() {
+                if hand.status == HandStatus::Playing {
+                    hand.status = HandStatus::Stood;
+                }
+            }
+        }
+        self.advance_turn();
     }
 
     fn handle_next_round(&mut self, player_id: Uuid) {
@@ -402,12 +422,14 @@ impl GameActor {
             });
             return;
         }
-        if self.phase == GamePhase::Payout {
-            self.start_betting_phase();
-        } else {
-            self.broadcast(ServerMessage::Error {
-                msg: "Next round can only be started from the Payout phase.".to_string(),
-            });
+
+        match self.phase {
+            GamePhase::Payout | GamePhase::GameOver => self.start_betting_phase(),
+            _ => {
+                self.broadcast(ServerMessage::Error {
+                    msg: "Next round can only be started from Payout or GameOver phase.".to_string(),
+                });
+            }
         }
     }
 
@@ -422,10 +444,17 @@ impl GameActor {
         let mut status_changed = false;
 
         if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
-            // Pending players cannot bet
             if player.status == PlayerStatus::PendingApproval {
                  self.broadcast(ServerMessage::Error {
                     msg: "You must be approved before playing.".to_string(),
+                });
+                return;
+            }
+
+            // Only switch from Sitting request -> Playing when betting
+            if player.status != PlayerStatus::Sitting && player.status != PlayerStatus::Spectating {
+                 self.broadcast(ServerMessage::Error {
+                    msg: "You cannot place a bet right now.".to_string(),
                 });
                 return;
             }
@@ -453,13 +482,26 @@ impl GameActor {
             return;
         }
 
-        let all_bets_placed = self.players.iter().all(|p| {
-            p.status == PlayerStatus::Spectating
-                || p.status == PlayerStatus::PendingApproval
-                || (p.status == PlayerStatus::Playing && !p.hands.is_empty())
+        // Check if all ELIGIBLE players have bet.
+        // Who is eligible?
+        // - Anyone who is 'Sitting' or 'Playing'.
+        // - 'Spectating' implicitly means 'Sitting' in this logic or 'Pending'.
+        // Actually, if we require ALL players in the room to bet before auto-start,
+        // then one person sitting out blocks the game.
+        // Flow Requirement: "if all have betted the system automatically starts".
+        // This implies if there are 3 people, and 3 people bet -> start.
+        // If 3 people, 2 bet, 1 sits -> Wait for admin or wait for 3rd?
+        // User said: "not betting players do not participate... game should not await their actions"
+        // So automatic start only happens if EVERYONE currently connected (and approved) has placed a bet.
+        
+        let all_ready = self.players.iter().all(|p| {
+            p.status == PlayerStatus::Playing
+            || p.status == PlayerStatus::PendingApproval // Pending don't count
+            // If someone is Sitting/Spectating, they haven't bet yet.
+            // If we have any 'Sitting' players, we are NOT ready for auto-start.
         });
 
-        if all_bets_placed {
+        if all_ready {
             self.start_action_phase();
         } else {
             self.broadcast_state();
@@ -606,6 +648,7 @@ impl GameActor {
 
     fn advance_turn(&mut self) {
         if let Some(player) = self.players.get_mut(self.turn_index) {
+            // Only advance hand index if this player is actually playing
             if player.status == PlayerStatus::Playing && player.active_hand_index + 1 < player.hands.len() {
                 player.active_hand_index += 1;
                 self.broadcast_state();
@@ -621,6 +664,7 @@ impl GameActor {
                 return;
             }
 
+            // Skip players who are not Playing (e.g. Sitting or Pending)
             if let Some(player) = self.players.get(self.turn_index) {
                 if player.status == PlayerStatus::Playing {
                     break;
@@ -690,41 +734,48 @@ impl GameActor {
 
     fn start_betting_phase(&mut self) {
         self.phase = GamePhase::Betting;
-        self.dealer_hand.clear(); // Clear dealer hand from previous round
+        self.dealer_hand.clear();
+
+        // Spectators stay Spectating.
+        // Playing players move to Sitting (waiting to bet).
+        // Pending stay Pending.
         for player in self.players.iter_mut() {
-            player.hands.clear(); // Clear player hands from previous round
-            if player.status != PlayerStatus::Spectating
-                && player.status != PlayerStatus::PendingApproval
-            {
-                player.status = PlayerStatus::Playing;
+            player.hands.clear();
+            if player.status == PlayerStatus::Playing
+               || player.status == PlayerStatus::Sitting 
+               || player.status == PlayerStatus::Spectating {
+                   // Everyone (except pending) becomes eligible to bet = Sitting
+                   // The term Spectating in this codebase has been used loosely. 
+                   // Let's say: if you are in the room, you are Sitting and can bet.
+                   // Unless you are Pending.
+                   if player.status != PlayerStatus::PendingApproval {
+                       player.status = PlayerStatus::Sitting;
+                   }
             }
         }
         self.broadcast_state();
     }
 
     fn start_action_phase(&mut self) {
-        // Ensure at least one player has a hand before starting functionality
-        let active_hands = self
-            .players
-            .iter()
-            .filter(|p| !p.hands.is_empty())
-            .count();
-        if active_hands == 0 {
-            // Should theoretically not happen due to handle_bet logic, but safe guard.
-            self.broadcast(ServerMessage::Error {
-                msg: "Cannot start round with no active bets.".to_string(),
-            });
-            return;
-        }
-
+        // Only consider players who have bet as active for this round.
+        // Players who are 'Sitting' (did not bet) are skipped.
         self.phase = GamePhase::Playing;
         self.turn_index = 0;
 
+        // Count how many players are actually playing
+        let players_playing = self.players.iter().filter(|p| p.status == PlayerStatus::Playing).count();
+        if players_playing == 0 {
+             self.broadcast(ServerMessage::Error {
+                msg: "Cannot start round with no active bets.".to_string(),
+            });
+            self.phase = GamePhase::Betting; // Revert
+            return;
+        }
+
+        // Deal cards only to Playing players
         for _ in 0..2 {
             for i in 0..self.players.len() {
-                let needs_card = self.players[i].status == PlayerStatus::Playing;
-
-                if needs_card {
+                if self.players[i].status == PlayerStatus::Playing {
                     if let Some(card) = self.draw_card() {
                         if let Some(player) = self.players.get_mut(i) {
                             if let Some(hand) = player.hands.get_mut(0) {
@@ -744,7 +795,7 @@ impl GameActor {
         if let Some(pos) = self.players.iter().position(|p| p.status == PlayerStatus::Playing) {
             self.turn_index = pos;
         } else {
-             // Should not happen due to guard above, but if it does, end round
+             // Should not happen due to guard above
              self.play_dealer_turn();
              return;
         }
