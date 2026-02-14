@@ -40,6 +40,9 @@ pub enum HandStatus {
     Busted,
     Blackjack,
     Doubled,
+    Won,
+    Lost,
+    Push,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

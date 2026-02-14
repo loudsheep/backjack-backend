@@ -647,12 +647,18 @@ impl GameActor {
 
                 if hand.status == HandStatus::Busted {
                     // Player loses bet
+                    hand.status = HandStatus::Lost;
                 } else if hand.status == HandStatus::Blackjack && dealer_value != 21 {
                     player.chips += (hand.bet as f32 * 2.5) as u32;
+                    hand.status = HandStatus::Won;
                 } else if dealer_value > 21 || hand_value > dealer_value {
                     player.chips += hand.bet * 2;
+                    hand.status = HandStatus::Won;
                 } else if hand_value == dealer_value {
                     player.chips += hand.bet; // Push, return bet
+                    hand.status = HandStatus::Push;
+                } else {
+                    hand.status = HandStatus::Lost;
                 }
 
                 // hand.bet = 0; // Keep bet amount for display during Payout
@@ -686,6 +692,20 @@ impl GameActor {
     }
 
     fn start_action_phase(&mut self) {
+        // Ensure at least one player has a hand before starting functionality
+        let active_hands = self
+            .players
+            .iter()
+            .filter(|p| !p.hands.is_empty())
+            .count();
+        if active_hands == 0 {
+            // Should theoretically not happen due to handle_bet logic, but safe guard.
+            self.broadcast(ServerMessage::Error {
+                msg: "Cannot start round with no active bets.".to_string(),
+            });
+            return;
+        }
+
         self.phase = GamePhase::Playing;
         self.turn_index = 0;
 
