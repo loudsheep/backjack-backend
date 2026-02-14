@@ -2,16 +2,23 @@ use crate::messages::ClientMessage;
 use crate::state::AppState;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::{Path, State},
+    extract::{Path, State, Query},
     http::StatusCode,
     response::IntoResponse,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use std::sync::Arc;
 
+#[derive(serde::Deserialize)]
+pub struct ConnectParams {
+    pub player_id: Option<uuid::Uuid>,
+    pub secret: Option<String>,
+}
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Path(game_id): Path<String>,
+    Query(params): Query<ConnectParams>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let handle = match state.get_game_handle(&game_id).await {
@@ -22,26 +29,36 @@ pub async fn ws_handler(
     let current_players = handle
         .player_count
         .load(std::sync::atomic::Ordering::Relaxed);
-    if current_players >= handle.settings.max_players {
+    // If reconnecting (params present), ignore max_players check?
+    // Actually difficult to check efficiently without locking actor.
+    // But if we reconnect, we are already one of the players (count includes disconnected players usually, code says:
+    // count = self.players.iter().filter(|p| p.is_connected).count()
+    // So if I disconnected, I am NOT counted. So I'm adding +1.
+    // If max players is reached, I cannot reconnect?
+    // That's a logic bug in how player_count is defined.
+    // Ideally reconnecting players should be allowed.
+    // For now I'll respect the existing check but user might want to fix this later.
+    if params.player_id.is_none() && current_players >= handle.settings.max_players {
         return StatusCode::FORBIDDEN.into_response(); // 403 if full
     }
 
-    let player_id = uuid::Uuid::new_v4();
+    let connection_id = uuid::Uuid::new_v4();
 
     tracing::info!(
-        "New WebSocket connection: player_id={}, game_id={}",
-        player_id,
+        "New WebSocket connection: connection_id={}, game_id={}",
+        connection_id,
         game_id
     );
 
-    ws.on_upgrade(move |socket| handle_socket(socket, game_id, player_id, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, game_id, connection_id, state, params))
 }
 
 async fn handle_socket(
     socket: WebSocket,
     game_id: String,
-    player_id: uuid::Uuid,
+    connection_id: uuid::Uuid,
     state: Arc<AppState>,
+    params: ConnectParams,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -52,6 +69,23 @@ async fn handle_socket(
         return;
     };
 
+    // If reconnect params are present, send Reconnect message immediately
+    if let (Some(pid), Some(secret)) = (params.player_id, params.secret) {
+        if tx
+            .send((
+                connection_id,
+                ClientMessage::Reconnect {
+                    player_id: pid,
+                    secret,
+                },
+            ))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+
     let mut rx = if let Some(rx) = state.subscribe_to_game(&game_id).await {
         rx
     } else {
@@ -60,7 +94,13 @@ async fn handle_socket(
 
     let send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
-            let json = serde_json::to_string(&msg).unwrap();
+            if let Some(target) = msg.target {
+                if target != connection_id {
+                    continue;
+                }
+            }
+
+            let json = serde_json::to_string(&msg.message).unwrap();
             // Fix: Convert String to Utf8Bytes using .into()
             if sender.send(Message::Text(json.into())).await.is_err() {
                 break;
@@ -72,12 +112,13 @@ async fn handle_socket(
         if let Message::Text(text) = msg {
             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                 // This now matches the type expected by state.rs
-                if tx.send((player_id, client_msg)).await.is_err() {
+                if tx.send((connection_id, client_msg)).await.is_err() {
                     break;
                 }
             }
         }
     }
 
+    let _ = tx.send((connection_id, ClientMessage::Disconnect)).await;
     send_task.abort();
 }

@@ -1,6 +1,6 @@
 use crate::{
     game::{actor::GameActor, types::GameSettings},
-    messages::{ClientMessage, ServerMessage},
+    messages::{ClientMessage, BroadcastMessage},
 };
 use rand::RngExt;
 use std::{collections::HashMap, sync::Mutex};
@@ -10,19 +10,29 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct GameHandle {
     pub sender: mpsc::Sender<(Uuid, ClientMessage)>,
-    pub state_sender: broadcast::Sender<ServerMessage>,
+    pub state_sender: broadcast::Sender<BroadcastMessage>,
     pub settings: GameSettings,
     pub player_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub created_at: std::time::Instant,
 }
 
 pub struct AppState {
     pub games: Mutex<HashMap<String, GameHandle>>,
+    cleanup_sender: mpsc::Sender<String>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(cleanup_sender: mpsc::Sender<String>) -> Self {
         AppState {
             games: Mutex::new(HashMap::new()),
+            cleanup_sender,
+        }
+    }
+
+    pub fn remove_game(&self, game_id: &str) {
+        let mut games = self.games.lock().unwrap();
+        if games.remove(game_id).is_some() {
+            tracing::info!("Game {} removed from AppState", game_id);
         }
     }
 
@@ -51,6 +61,7 @@ impl AppState {
             rx,
             tx_state.clone(),
             player_count.clone(),
+            self.cleanup_sender.clone(),
         );
 
         let game_id_owned = id.clone();
@@ -64,6 +75,7 @@ impl AppState {
             state_sender: tx_state,
             settings: settings,
             player_count: player_count,
+            created_at: std::time::Instant::now(),
         };
 
         games.insert(id.clone(), handle);
@@ -80,7 +92,7 @@ impl AppState {
     pub async fn subscribe_to_game(
         &self,
         game_id: &str,
-    ) -> Option<broadcast::Receiver<ServerMessage>> {
+    ) -> Option<broadcast::Receiver<BroadcastMessage>> {
         self.get_game_handle(game_id)
             .await
             .map(|h| h.state_sender.subscribe())

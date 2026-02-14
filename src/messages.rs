@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub enum ClientMessage {
     // Lobby Actions
     JoinGame { username: String },
+    Reconnect { player_id: Uuid, secret: String },
 
     // Admin Actions
     StartGame, // Transitions Lobby -> Betting
@@ -20,6 +21,10 @@ pub enum ClientMessage {
     PlaceBet { amount: u32 },
     GameAction { action_type: ActionType }, // Hit, Stand, Double, Split
     Chat { message: String },
+
+    // Internal/System
+    #[serde(skip_deserializing)]
+    Disconnect,
 }
 
 #[derive(Deserialize, Debug)]
@@ -28,6 +33,12 @@ pub enum ActionType {
     Stand,
     Double,
     Split,
+}
+
+#[derive(Clone, Debug)]
+pub struct BroadcastMessage {
+    pub target: Option<Uuid>, // If None, Broadcast. If Some, Unicast to Connection ID.
+    pub message: ServerMessage,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -39,6 +50,7 @@ pub enum ServerMessage {
     JoinedLobby {
         game_id: String,
         your_id: Uuid,
+        secret: String,
         is_admin: bool,
     },
 

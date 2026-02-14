@@ -20,6 +20,10 @@ pub struct Player {
     pub active_hand_index: usize,
     pub status: PlayerStatus,
     pub is_admin: bool,
+    #[serde(skip)]
+    pub secret: String,
+    #[serde(skip)]
+    pub is_connected: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

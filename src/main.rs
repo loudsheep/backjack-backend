@@ -21,7 +21,20 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let shared_state = std::sync::Arc::new(state::AppState::new());
+    let (cleanup_tx, mut cleanup_rx) = tokio::sync::mpsc::channel(100);
+    let shared_state = std::sync::Arc::new(state::AppState::new(cleanup_tx));
+
+    // Cleanup task
+    let state_weak = std::sync::Arc::downgrade(&shared_state);
+    tokio::spawn(async move {
+        while let Some(game_id) = cleanup_rx.recv().await {
+            if let Some(state) = state_weak.upgrade() {
+                state.remove_game(&game_id);
+            } else {
+                break;
+            }
+        }
+    });
 
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!" }))

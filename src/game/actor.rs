@@ -1,5 +1,5 @@
 use crate::game::types::*;
-use crate::messages::{ActionType, ClientMessage, ServerMessage};
+use crate::messages::{ActionType, ClientMessage, ServerMessage, BroadcastMessage};
 use rand::seq::SliceRandom;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -13,10 +13,14 @@ pub struct GameActor {
     dealer_hand: Vec<Card>,
     turn_index: usize, // Who is playing right now?
 
+    // connection_id -> player_id
+    connection_map: std::collections::HashMap<Uuid, Uuid>,
+
     // Channels
     receiver: mpsc::Receiver<(Uuid, ClientMessage)>, // We need to know WHO sent the msg
-    sender: broadcast::Sender<ServerMessage>,
+    sender: broadcast::Sender<BroadcastMessage>,
     player_count_ref: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    cleanup_sender: mpsc::Sender<String>,
 }
 
 impl GameActor {
@@ -24,8 +28,9 @@ impl GameActor {
         game_id: String,
         settings: GameSettings,
         receiver: mpsc::Receiver<(Uuid, ClientMessage)>,
-        sender: broadcast::Sender<ServerMessage>,
+        sender: broadcast::Sender<BroadcastMessage>,
         player_count_ref: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        cleanup_sender: mpsc::Sender<String>,
     ) -> Self {
         let mut actor = Self {
             game_id,
@@ -35,64 +40,105 @@ impl GameActor {
             players: Vec::new(),
             dealer_hand: Vec::new(),
             turn_index: 0,
+            connection_map: std::collections::HashMap::new(),
             receiver,
             sender,
             player_count_ref,
+            cleanup_sender,
         };
         actor.init_deck();
         actor
     }
 
     pub async fn run(&mut self) {
-        while let Some((player_id, msg)) = self.receiver.recv().await {
-            match msg {
-                ClientMessage::JoinGame { username } => {
-                    self.handle_join(player_id, username);
+        loop {
+            // If there are no active connections, wait with a timeout. 
+            // If the timeout triggers, clean up and exit.
+            let msg_option = if self.connection_map.is_empty() {
+                // 60 seconds grace period for reconnections/initial join
+                match tokio::time::timeout(std::time::Duration::from_secs(60), self.receiver.recv()).await {
+                    Ok(res) => res,
+                    Err(_) => {
+                        // Timeout reached, cleanup
+                        tracing::info!("Game {} timeout due to inactivity", self.game_id);
+                        let _ = self.cleanup_sender.send(self.game_id.clone()).await;
+                        return;
+                    }
                 }
+            } else {
+                self.receiver.recv().await
+            };
 
-                ClientMessage::PlaceBet { amount } => {
-                    self.handle_bet(player_id, amount);
+            if let Some((conn_id, msg)) = msg_option {
+                match msg {
+                    ClientMessage::JoinGame { username } => {
+                        self.handle_join(conn_id, username);
+                    }
+                    ClientMessage::Reconnect { player_id, secret } => {
+                        self.handle_reconnect(conn_id, player_id, secret);
+                    }
+                    ClientMessage::Disconnect => {
+                        self.handle_disconnect(conn_id);
+                    }
+                    other => {
+                        if let Some(&player_id) = self.connection_map.get(&conn_id) {
+                            self.handle_game_message(player_id, other);
+                        }
+                    }
                 }
-
-                ClientMessage::GameAction { action_type } => {
-                    self.handle_action(player_id, action_type);
-                }
-
-                ClientMessage::ApprovePlayer {
-                    player_id: target_id,
-                } => {
-                    self.handle_approve(player_id, target_id);
-                }
-
-                ClientMessage::KickPlayer {
-                    player_id: target_id,
-                } => {
-                    self.handle_kick(player_id, target_id);
-                }
-
-                ClientMessage::UpdateSettings { settings } => {
-                    self.handle_update_settings(player_id, settings);
-                }
-
-                ClientMessage::AdminUpdateBalance {
-                    target_id,
-                    change_chips,
-                } => {
-                    self.handle_admin_update_balance(player_id, target_id, change_chips);
-                }
-
-                ClientMessage::Chat { message } => {
-                    self.handle_chat(player_id, message);
-                }
-
-                ClientMessage::StartGame => {
-                    self.handle_start_game(player_id);
-                }
-
-                ClientMessage::NextRound => {
-                    self.handle_next_round(player_id);
-                }
+            } else {
+                // Channel closed
+                break;
             }
+        }
+    }
+
+    fn handle_game_message(&mut self, player_id: Uuid, msg: ClientMessage) {
+        match msg {
+            ClientMessage::PlaceBet { amount } => {
+                self.handle_bet(player_id, amount);
+            }
+
+            ClientMessage::GameAction { action_type } => {
+                self.handle_action(player_id, action_type);
+            }
+
+            ClientMessage::ApprovePlayer {
+                player_id: target_id,
+            } => {
+                self.handle_approve(player_id, target_id);
+            }
+
+            ClientMessage::KickPlayer {
+                player_id: target_id,
+            } => {
+                self.handle_kick(player_id, target_id);
+            }
+
+            ClientMessage::UpdateSettings { settings } => {
+                self.handle_update_settings(player_id, settings);
+            }
+
+            ClientMessage::AdminUpdateBalance {
+                target_id,
+                change_chips,
+            } => {
+                self.handle_admin_update_balance(player_id, target_id, change_chips);
+            }
+
+            ClientMessage::Chat { message } => {
+                self.handle_chat(player_id, message);
+            }
+
+            ClientMessage::StartGame => {
+                self.handle_start_game(player_id);
+            }
+
+            ClientMessage::NextRound => {
+                self.handle_next_round(player_id);
+            }
+            
+            _ => {} // Handled in run()
         }
     }
 
@@ -113,17 +159,41 @@ impl GameActor {
             .unwrap_or(false)
     }
 
-    fn handle_join(&mut self, player_id: Uuid, username: String) {
-        if self.players.iter().any(|p| p.id == player_id) {
+    // Helper functions
+    fn broadcast(&self, msg: ServerMessage) {
+        let _ = self.sender.send(BroadcastMessage {
+            target: None,
+            message: msg,
+        });
+    }
+
+    fn send_to(&self, conn_id: Uuid, msg: ServerMessage) {
+        let _ = self.sender.send(BroadcastMessage {
+            target: Some(conn_id),
+            message: msg,
+        });
+    }
+
+    fn update_player_count(&self) {
+        let count = self.players.iter().filter(|p| p.is_connected).count();
+        self.player_count_ref.store(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn handle_join(&mut self, conn_id: Uuid, username: String) {
+        if self.connection_map.contains_key(&conn_id) {
             return;
         }
 
         if self.players.len() >= self.settings.max_players {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.send_to(conn_id, ServerMessage::Error {
                 msg: "Game is full".to_string(),
             });
             return;
         }
+
+        let player_id = Uuid::new_v4();
+        let secret = Uuid::new_v4().to_string();
+        self.connection_map.insert(conn_id, player_id);
 
         let is_first = self.players.is_empty();
         let status = if self.settings.approval_required && !is_first {
@@ -137,7 +207,7 @@ impl GameActor {
                 id: player_id,
                 name: username.clone(),
             };
-            let _ = self.sender.send(msg); // Admins should listen for this
+            self.broadcast(msg); // Admins should listen for this
         }
 
         self.players.push(Player {
@@ -148,25 +218,75 @@ impl GameActor {
             active_hand_index: 0,
             status: status.clone(),
             is_admin: is_first,
+            secret: secret.clone(),
+            is_connected: true,
         });
 
-        // Update shared player count
-        self.player_count_ref
-            .store(self.players.len(), std::sync::atomic::Ordering::Relaxed);
+        self.update_player_count();
 
-        // Broadcast JoinedLobby - clients should check if `your_id` matches theirs
-        let _ = self.sender.send(ServerMessage::JoinedLobby {
+        self.send_to(conn_id, ServerMessage::JoinedLobby {
             game_id: self.game_id.clone(),
             your_id: player_id,
+            secret: secret,
             is_admin: is_first,
         });
 
         self.broadcast_state();
     }
 
+    fn handle_reconnect(&mut self, conn_id: Uuid, player_id: Uuid, secret: String) {
+        if self.connection_map.contains_key(&conn_id) {
+             return; 
+        }
+
+        let mut success = false;
+        let mut is_admin_val = false;
+        let mut secret_val = String::new();
+        let mut error_msg = None;
+
+        if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
+             if player.secret == secret {
+                 self.connection_map.insert(conn_id, player_id);
+                 player.is_connected = true;
+                 success = true;
+                 is_admin_val = player.is_admin;
+                 secret_val = player.secret.clone();
+             } else {
+                 error_msg = Some("Invalid secret");
+             }
+        } else {
+             error_msg = Some("Player not found");
+        }
+
+        if success {
+             self.update_player_count();
+             
+             self.send_to(conn_id, ServerMessage::JoinedLobby {
+                 game_id: self.game_id.clone(),
+                 your_id: player_id,
+                 secret: secret_val,
+                 is_admin: is_admin_val,
+             });
+             self.broadcast_state();
+        } else if let Some(msg) = error_msg {
+             self.send_to(conn_id, ServerMessage::Error { msg: msg.into() });
+        }
+    }
+
+    fn handle_disconnect(&mut self, conn_id: Uuid) {
+        if let Some(player_id) = self.connection_map.remove(&conn_id) {
+            if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
+                player.is_connected = false;
+            }
+            self.update_player_count();
+            // Don't remove player immediately.
+            self.broadcast_state();
+        }
+    }
+
     fn handle_approve(&mut self, admin_id: Uuid, target_id: Uuid) {
         if !self.is_admin(admin_id) {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Only admins can approve players.".to_string(),
             });
             return;
@@ -182,7 +302,7 @@ impl GameActor {
 
     fn handle_kick(&mut self, admin_id: Uuid, target_id: Uuid) {
         if !self.is_admin(admin_id) {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Only admins can kick players.".to_string(),
             });
             return;
@@ -197,7 +317,7 @@ impl GameActor {
 
     fn handle_update_settings(&mut self, admin_id: Uuid, settings: GameSettings) {
         if !self.is_admin(admin_id) {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Only admins can update settings.".to_string(),
             });
             return;
@@ -208,7 +328,7 @@ impl GameActor {
 
     fn handle_admin_update_balance(&mut self, admin_id: Uuid, target_id: Uuid, change_chips: i32) {
         if !self.is_admin(admin_id) {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Only admins can update player balances.".to_string(),
             });
             return;
@@ -231,7 +351,7 @@ impl GameActor {
 
     fn handle_chat(&mut self, player_id: Uuid, msg: String) {
         if !self.settings.chat_enabled {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Chat is currently disabled.".to_string(),
             });
             return;
@@ -244,7 +364,7 @@ impl GameActor {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
-        let _ = self.sender.send(ServerMessage::ChatBroadcast {
+        self.broadcast(ServerMessage::ChatBroadcast {
             from: sender_name,
             msg,
         });
@@ -252,7 +372,7 @@ impl GameActor {
 
     fn handle_start_game(&mut self, player_id: Uuid) {
         if !self.is_admin(player_id) {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Only admins can start the game.".to_string(),
             });
             return;
@@ -260,7 +380,7 @@ impl GameActor {
         if self.phase == GamePhase::Lobby {
             self.start_betting_phase();
         } else {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Game can only be started from the Lobby phase.".to_string(),
             });
         }
@@ -268,7 +388,7 @@ impl GameActor {
 
     fn handle_next_round(&mut self, player_id: Uuid) {
         if !self.is_admin(player_id) {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Only admins can start the next round.".to_string(),
             });
             return;
@@ -276,7 +396,7 @@ impl GameActor {
         if self.phase == GamePhase::Payout {
             self.start_betting_phase();
         } else {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Next round can only be started from the Payout phase.".to_string(),
             });
         }
@@ -284,7 +404,7 @@ impl GameActor {
 
     fn handle_bet(&mut self, player_id: Uuid, amount: u32) {
         if self.phase != GamePhase::Betting {
-             let _ = self.sender.send(ServerMessage::Error {
+             self.broadcast(ServerMessage::Error {
                 msg: "Bets can only be placed during the Betting phase.".to_string(),
             });
             return;
@@ -295,7 +415,7 @@ impl GameActor {
         if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
             // Pending players cannot bet
             if player.status == PlayerStatus::PendingApproval {
-                 let _ = self.sender.send(ServerMessage::Error {
+                 self.broadcast(ServerMessage::Error {
                     msg: "You must be approved before playing.".to_string(),
                 });
                 return;
@@ -313,7 +433,7 @@ impl GameActor {
                 player.active_hand_index = 0;
                 status_changed = true;
             } else {
-                 let _ = self.sender.send(ServerMessage::Error {
+                 self.broadcast(ServerMessage::Error {
                     msg: "Not enough chips to place bet.".to_string(),
                 });
                 return;
@@ -339,7 +459,7 @@ impl GameActor {
 
     fn handle_action(&mut self, player_id: Uuid, action: ActionType) {
         if self.phase != GamePhase::Playing {
-            let _ = self.sender.send(ServerMessage::Error {
+            self.broadcast(ServerMessage::Error {
                 msg: "Actions can only be performed during the Playing phase.".to_string(),
             });
             return;
@@ -351,7 +471,7 @@ impl GameActor {
             .unwrap_or(false);
 
         if !is_turn {
-             let _ = self.sender.send(ServerMessage::Error {
+             self.broadcast(ServerMessage::Error {
                 msg: "It is not your turn.".to_string(),
             });
             return;
@@ -368,7 +488,7 @@ impl GameActor {
                         if player.chips >= hand.bet {
                             action_result = ActionResult::Double(hand.bet);
                         } else {
-                             let _ = self.sender.send(ServerMessage::Error {
+                             self.broadcast(ServerMessage::Error {
                                 msg: "Not enough chips to double down.".to_string(),
                             });
                         }
@@ -380,7 +500,7 @@ impl GameActor {
                         {
                             action_result = ActionResult::Split(hand.bet);
                         } else {
-                             let _ = self.sender.send(ServerMessage::Error {
+                             self.broadcast(ServerMessage::Error {
                                 msg: "Cannot split: need pair and enough chips.".to_string(),
                             });
                         }
@@ -605,7 +725,7 @@ impl GameActor {
             settings: self.settings.clone(),
         };
 
-        let _ = self.sender.send(msg);
+        self.broadcast(msg);
     }
 }
 
