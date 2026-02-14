@@ -44,10 +44,31 @@ The server will start (default: `http://127.0.0.1:3000`).
 
 The backend exposes a WebSocket interaction model. The application state is authoritative on the server.
 
+### Creating a Game
+**URL:** `POST http://<host>/game/create`
+
+**Request Body:**
+```json
+{
+  "initial_chips": 1000,
+  "max_players": 5,
+  "deck_count": 1,
+  "approval_required": false,
+  "chat_enabled": true
+}
+```
+
+**Response:**
+```json
+{
+  "game_id": "123456"
+}
+```
+
 ### Connection
 **URL:** `ws://<host>/ws/<game_id>`
 
-*   `game_id`: A unique string identifier for the room (e.g., "room1", "lobby-a"). If the room doesn't exist, it is created lazily when the first user connects and sends a message.
+*   `game_id`: A unique string identifier for the room. You must create the game using the `/game/create` endpoint before connecting. If the room doesn't exist, the connection will be rejected with a `404 Not Found`.
 
 ### Protocol
 All messages are JSON objects.

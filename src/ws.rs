@@ -2,6 +2,7 @@ use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{State, Path},
     response::IntoResponse,
+    http::StatusCode,
 };
 use crate::state::AppState;
 use crate::messages::ClientMessage;
@@ -13,6 +14,10 @@ pub async fn ws_handler(
     Path(game_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if state.get_game_handle(&game_id).await.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     let player_id = uuid::Uuid::new_v4();
 
     tracing::info!("New WebSocket connection: player_id={}, game_id={}", player_id, game_id);
@@ -23,8 +28,18 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, game_id: String, player_id: uuid::Uuid, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
-    let tx = state.get_game_sender(&game_id).await;
-    let mut rx = state.subscribe_to_game(&game_id).await;
+    let tx = if let Some(tx) = state.get_game_sender(&game_id).await {
+        tx
+    } else {
+        tracing::warn!("Game {} not found during socket setup", game_id);
+        return;
+    };
+
+    let mut rx = if let Some(rx) = state.subscribe_to_game(&game_id).await {
+        rx
+    } else {
+        return;
+    };
 
     let send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {

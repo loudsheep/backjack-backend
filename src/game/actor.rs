@@ -21,19 +21,13 @@ pub struct GameActor {
 impl GameActor {
     pub fn new(
         game_id: String,
+        settings: GameSettings,
         receiver: mpsc::Receiver<(Uuid, ClientMessage)>,
         sender: broadcast::Sender<ServerMessage>,
     ) -> Self {
-        Self {
+        let mut actor = Self {
             game_id,
-            // Default settings, will be overwritten by CreateGame
-            settings: GameSettings {
-                initial_chips: 1000,
-                max_players: 5,
-                deck_count: 1,
-                approval_required: false,
-                chat_enabled: true,
-            },
+            settings,
             phase: GamePhase::Lobby,
             deck: Vec::new(),
             players: Vec::new(),
@@ -41,26 +35,16 @@ impl GameActor {
             turn_index: 0,
             receiver,
             sender,
-        }
+        };
+        actor.init_deck();
+        actor
     }
 
     pub async fn run(&mut self) {
         while let Some((player_id, msg)) = self.receiver.recv().await {
             match msg {
-                ClientMessage::CreateGame { settings, .. } => {
-                    if self.phase == GamePhase::Lobby {
-                        self.settings = settings;
-                        self.init_deck();
-                    }
-                }
-                ClientMessage::JoinGame { username, .. } => {
+                ClientMessage::JoinGame { username } => {
                     self.handle_join(player_id, username);
-                }
-
-                ClientMessage::StartGame => {
-                    if self.is_admin(player_id) && self.phase == GamePhase::Lobby {
-                        self.start_betting_phase();
-                    }
                 }
 
                 ClientMessage::PlaceBet { amount } => {

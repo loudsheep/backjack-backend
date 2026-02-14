@@ -1,5 +1,5 @@
 use crate::{
-    game::actor::GameActor,
+    game::{actor::GameActor, types::GameSettings},
     messages::{ClientMessage, ServerMessage},
 };
 use std::{collections::HashMap, sync::Mutex};
@@ -24,19 +24,27 @@ impl AppState {
         }
     }
 
-    pub async fn get_game_handle(&self, game_id: &str) -> GameHandle {
-        let mut games = self.games.lock().unwrap();
+    pub async fn get_game_handle(&self, game_id: &str) -> Option<GameHandle> {
+        let games = self.games.lock().unwrap();
+        games.get(game_id).cloned()
+    }
 
-        if let Some(handle) = games.get(game_id) {
-            return handle.clone();
-        }
+    pub fn create_game(&self, settings: GameSettings) -> String {
+        let mut games = self.games.lock().unwrap();
+        let mut rng = rand::rng();
+        let id = loop {
+            let id = format!("{:06}", rng.random_range(0..999999));
+            if !games.contains_key(&id) {
+                break id;
+            }
+        };
 
         let (tx, rx) = mpsc::channel(100);
         let (tx_state, _) = broadcast::channel(100);
 
-        let mut actor = GameActor::new(game_id.to_string(), rx, tx_state.clone());
+        let mut actor = GameActor::new(id.clone(), settings, rx, tx_state.clone());
 
-        let game_id_owned = game_id.to_string(); 
+        let game_id_owned = id.clone();
         tokio::spawn(async move {
             actor.run().await;
             tracing::info!("Game {} ended", game_id_owned);
@@ -47,25 +55,16 @@ impl AppState {
             state_sender: tx_state,
         };
 
-        games.insert(game_id.to_string(), handle.clone());
-        handle
+        games.insert(id.clone(), handle);
+        id
     }
 
-    pub fn generate_game_id(&self) -> String {
-        let mut rng = rand::rng();
-        loop {
-            let id = format!("{:06}", rng.random_range(0..999999)); // rng.gen_range or random_range
-            if !self.games.lock().unwrap().contains_key(&id) {
-                return id;
-            }
-        }
+
+    pub async fn get_game_sender(&self, game_id: &str) -> Option<mpsc::Sender<(Uuid, ClientMessage)>> {
+        self.get_game_handle(game_id).await.map(|h| h.sender)
     }
 
-    pub async fn get_game_sender(&self, game_id: &str) -> mpsc::Sender<(Uuid, ClientMessage)> {
-        self.get_game_handle(game_id).await.sender
-    }
-
-    pub async fn subscribe_to_game(&self, game_id: &str) -> broadcast::Receiver<ServerMessage> {
-        self.get_game_handle(game_id).await.state_sender.subscribe()
+    pub async fn subscribe_to_game(&self, game_id: &str) -> Option<broadcast::Receiver<ServerMessage>> {
+        self.get_game_handle(game_id).await.map(|h| h.state_sender.subscribe())
     }
 }

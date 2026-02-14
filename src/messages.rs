@@ -6,8 +6,7 @@ use crate::game::types::{GameSettings, Player, Card, GamePhase};
 #[serde(tag = "action", content = "payload")]
 pub enum ClientMessage {
     // Lobby Actions
-    CreateGame { settings: GameSettings, username: String },
-    JoinGame { game_id: String, username: String },
+    JoinGame { username: String },
     
     // Admin Actions
     StartGame, // Transitions Lobby -> Betting

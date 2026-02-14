@@ -3,8 +3,9 @@ mod ws;
 mod messages;
 mod state;
 
-use axum::{Router, routing::get};
+use axum::{Router, routing::{get, post}};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use game::handlers::create_game_handler;
 
 #[tokio::main]
 async fn main() {
@@ -21,6 +22,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(|| async { "Hello, World!" }))
+        .route("/game/create", post(create_game_handler))
         .route("/ws/{game_id}", get(ws::ws_handler))
         .with_state(shared_state);
 
