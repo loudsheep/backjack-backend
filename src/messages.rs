@@ -1,0 +1,45 @@
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use crate::game::types::{GameSettings, Player, Card, GamePhase};
+
+#[derive(Deserialize, Debug)]
+#[serde(tag = "action", content = "payload")]
+pub enum ClientMessage {
+    // Lobby Actions
+    CreateGame { settings: GameSettings, username: String },
+    JoinGame { game_id: String, username: String },
+    
+    // Admin Actions
+    StartGame, // Transitions Lobby -> Betting
+    ApprovePlayer { player_id: Uuid },
+    KickPlayer { player_id: Uuid },
+    UpdateSettings { settings: GameSettings }, // Mid-game change
+    AdminAction { target_id: Uuid, change_chips: i32 }, // Admin cheat/fix
+    NextRound, // Transitions Payout -> Betting
+
+    // Player Actions
+    PlaceBet { amount: u32 },
+    GameAction { action_type: ActionType }, // Hit, Stand, Double, Split
+    Chat { message: String },
+}
+
+#[derive(Deserialize, Debug)]
+pub enum ActionType { Hit, Stand, Double, Split }
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "event", content = "data")]
+pub enum ServerMessage {
+    Error { msg: String },
+    JoinedLobby { game_id: String, your_id: Uuid, is_admin: bool },
+    
+    GameStateSnapshot {
+        phase: GamePhase,
+        dealer_hand: Vec<Card>,
+        players: Vec<Player>,
+        deck_remaining: usize,
+        current_turn_player_id: Option<Uuid>,
+    },
+
+    ChatBroadcast { from: String, msg: String },
+    PlayerRequest { id: Uuid, name: String }, // Sent to admin only
+}

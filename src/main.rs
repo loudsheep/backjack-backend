@@ -1,3 +1,8 @@
+mod game;
+mod ws;
+mod messages;
+mod state;
+
 use axum::{Router, routing::get};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
