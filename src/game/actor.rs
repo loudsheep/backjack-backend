@@ -386,9 +386,11 @@ impl GameActor {
         }
         if self.phase == GamePhase::Lobby {
             self.start_betting_phase();
+        } else if self.phase == GamePhase::Betting {
+             self.start_action_phase();
         } else {
             self.broadcast(ServerMessage::Error {
-                msg: "Game can only be started from the Lobby phase.".to_string(),
+                msg: "Game can only be started from the Lobby or Betting phase.".to_string(),
             });
         }
     }
@@ -604,20 +606,29 @@ impl GameActor {
 
     fn advance_turn(&mut self) {
         if let Some(player) = self.players.get_mut(self.turn_index) {
-            if player.active_hand_index + 1 < player.hands.len() {
+            if player.status == PlayerStatus::Playing && player.active_hand_index + 1 < player.hands.len() {
                 player.active_hand_index += 1;
                 self.broadcast_state();
                 return;
             }
         }
 
-        self.turn_index += 1;
+        loop {
+            self.turn_index += 1;
 
-        if self.turn_index >= self.players.len() {
-            self.play_dealer_turn();
-        } else {
-            self.broadcast_state();
+            if self.turn_index >= self.players.len() {
+                self.play_dealer_turn();
+                return;
+            }
+
+            if let Some(player) = self.players.get(self.turn_index) {
+                if player.status == PlayerStatus::Playing {
+                    break;
+                }
+            }
         }
+        
+        self.broadcast_state();
     }
 
     fn play_dealer_turn(&mut self) {
@@ -727,6 +738,15 @@ impl GameActor {
             if let Some(card) = self.draw_card() {
                 self.dealer_hand.push(card);
             }
+        }
+
+        // Set turn_index to the first active player
+        if let Some(pos) = self.players.iter().position(|p| p.status == PlayerStatus::Playing) {
+            self.turn_index = pos;
+        } else {
+             // Should not happen due to guard above, but if it does, end round
+             self.play_dealer_turn();
+             return;
         }
 
         self.broadcast_state();
