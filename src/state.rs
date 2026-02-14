@@ -2,8 +2,8 @@ use crate::{
     game::{actor::GameActor, types::GameSettings},
     messages::{ClientMessage, ServerMessage},
 };
-use std::{collections::HashMap, sync::Mutex};
 use rand::RngExt;
+use std::{collections::HashMap, sync::Mutex};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
@@ -45,7 +45,13 @@ impl AppState {
         let (tx_state, _) = broadcast::channel(100);
 
         let player_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut actor = GameActor::new(id.clone(), settings.clone(), rx, tx_state.clone(), player_count.clone());
+        let mut actor = GameActor::new(
+            id.clone(),
+            settings.clone(),
+            rx,
+            tx_state.clone(),
+            player_count.clone(),
+        );
 
         let game_id_owned = id.clone();
         tokio::spawn(async move {
@@ -64,12 +70,19 @@ impl AppState {
         id
     }
 
-
-    pub async fn get_game_sender(&self, game_id: &str) -> Option<mpsc::Sender<(Uuid, ClientMessage)>> {
+    pub async fn get_game_sender(
+        &self,
+        game_id: &str,
+    ) -> Option<mpsc::Sender<(Uuid, ClientMessage)>> {
         self.get_game_handle(game_id).await.map(|h| h.sender)
     }
 
-    pub async fn subscribe_to_game(&self, game_id: &str) -> Option<broadcast::Receiver<ServerMessage>> {
-        self.get_game_handle(game_id).await.map(|h| h.state_sender.subscribe())
+    pub async fn subscribe_to_game(
+        &self,
+        game_id: &str,
+    ) -> Option<broadcast::Receiver<ServerMessage>> {
+        self.get_game_handle(game_id)
+            .await
+            .map(|h| h.state_sender.subscribe())
     }
 }

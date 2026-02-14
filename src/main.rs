@@ -1,11 +1,14 @@
 mod game;
-mod ws;
 mod messages;
 mod state;
+mod ws;
 
-use axum::{Router, routing::{get, post}};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use game::handlers::create_game_handler;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() {
@@ -29,7 +32,7 @@ async fn main() {
     // get address and port from environment variables or use defaults
     let addr = std::env::var("APP_ADDRESS").unwrap_or_else(|_| "127.0.0.1:3000".into());
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    
+
     tracing::info!("Starting server on {}", addr);
     axum::serve(listener, app).await.unwrap();
 }

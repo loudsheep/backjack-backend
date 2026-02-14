@@ -58,11 +58,15 @@ impl GameActor {
                     self.handle_action(player_id, action_type);
                 }
 
-                ClientMessage::ApprovePlayer { player_id: target_id } => {
+                ClientMessage::ApprovePlayer {
+                    player_id: target_id,
+                } => {
                     self.handle_approve(player_id, target_id);
                 }
 
-                ClientMessage::KickPlayer { player_id: target_id } => {
+                ClientMessage::KickPlayer {
+                    player_id: target_id,
+                } => {
                     self.handle_kick(player_id, target_id);
                 }
 
@@ -70,7 +74,10 @@ impl GameActor {
                     self.handle_update_settings(player_id, settings);
                 }
 
-                ClientMessage::AdminUpdateBalance { target_id, change_chips } => {
+                ClientMessage::AdminUpdateBalance {
+                    target_id,
+                    change_chips,
+                } => {
                     self.handle_admin_update_balance(player_id, target_id, change_chips);
                 }
 
@@ -142,9 +149,10 @@ impl GameActor {
             status: status.clone(),
             is_admin: is_first,
         });
-        
+
         // Update shared player count
-        self.player_count_ref.store(self.players.len(), std::sync::atomic::Ordering::Relaxed);
+        self.player_count_ref
+            .store(self.players.len(), std::sync::atomic::Ordering::Relaxed);
 
         // Broadcast JoinedLobby - clients should check if `your_id` matches theirs
         let _ = self.sender.send(ServerMessage::JoinedLobby {
@@ -157,8 +165,10 @@ impl GameActor {
     }
 
     fn handle_approve(&mut self, admin_id: Uuid, target_id: Uuid) {
-        if !self.is_admin(admin_id) { return; }
-        
+        if !self.is_admin(admin_id) {
+            return;
+        }
+
         if let Some(player) = self.players.iter_mut().find(|p| p.id == target_id) {
             if player.status == PlayerStatus::PendingApproval {
                 player.status = PlayerStatus::Spectating;
@@ -168,7 +178,9 @@ impl GameActor {
     }
 
     fn handle_kick(&mut self, admin_id: Uuid, target_id: Uuid) {
-        if !self.is_admin(admin_id) { return; }
+        if !self.is_admin(admin_id) {
+            return;
+        }
 
         // Remove player
         if let Some(pos) = self.players.iter().position(|p| p.id == target_id) {
@@ -178,13 +190,17 @@ impl GameActor {
     }
 
     fn handle_update_settings(&mut self, admin_id: Uuid, settings: GameSettings) {
-        if !self.is_admin(admin_id) { return; }
+        if !self.is_admin(admin_id) {
+            return;
+        }
         self.settings = settings;
         self.broadcast_state();
     }
 
     fn handle_admin_update_balance(&mut self, admin_id: Uuid, target_id: Uuid, change_chips: i32) {
-        if !self.is_admin(admin_id) { return; }
+        if !self.is_admin(admin_id) {
+            return;
+        }
 
         if let Some(player) = self.players.iter_mut().find(|p| p.id == target_id) {
             if change_chips < 0 {
@@ -202,9 +218,14 @@ impl GameActor {
     }
 
     fn handle_chat(&mut self, player_id: Uuid, msg: String) {
-        if !self.settings.chat_enabled { return; }
+        if !self.settings.chat_enabled {
+            return;
+        }
 
-        let sender_name = self.players.iter().find(|p| p.id == player_id)
+        let sender_name = self
+            .players
+            .iter()
+            .find(|p| p.id == player_id)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
@@ -215,19 +236,22 @@ impl GameActor {
     }
 
     fn handle_start_game(&mut self, player_id: Uuid) {
-        if !self.is_admin(player_id) { return; }
+        if !self.is_admin(player_id) {
+            return;
+        }
         if self.phase == GamePhase::Lobby {
             self.start_betting_phase();
         }
     }
 
     fn handle_next_round(&mut self, player_id: Uuid) {
-        if !self.is_admin(player_id) { return; }
+        if !self.is_admin(player_id) {
+            return;
+        }
         if self.phase == GamePhase::Payout {
             self.start_betting_phase();
         }
     }
-
 
     fn handle_bet(&mut self, player_id: Uuid, amount: u32) {
         if self.phase != GamePhase::Betting {
@@ -256,7 +280,9 @@ impl GameActor {
             }
         }
 
-        if !status_changed { return; }
+        if !status_changed {
+            return;
+        }
 
         let all_bets_placed = self.players.iter().all(|p| {
             p.status == PlayerStatus::Spectating
@@ -298,8 +324,10 @@ impl GameActor {
                         }
                     }
                     ActionType::Split => {
-                        if hand.cards.len() == 2 && player.chips >= hand.bet 
-                            && hand.cards[0].rank == hand.cards[1].rank {
+                        if hand.cards.len() == 2
+                            && player.chips >= hand.bet
+                            && hand.cards[0].rank == hand.cards[1].rank
+                        {
                             action_result = ActionResult::Split(hand.bet);
                         }
                     }
@@ -465,7 +493,9 @@ impl GameActor {
     fn start_betting_phase(&mut self) {
         self.phase = GamePhase::Betting;
         for player in self.players.iter_mut() {
-            if player.status != PlayerStatus::Spectating && player.status != PlayerStatus::PendingApproval {
+            if player.status != PlayerStatus::Spectating
+                && player.status != PlayerStatus::PendingApproval
+            {
                 player.status = PlayerStatus::Playing;
             }
         }

@@ -1,8 +1,11 @@
-use axum::{extract::State, response::{IntoResponse, Json}};
+use crate::game::types::GameSettings;
+use crate::state::AppState;
+use axum::{
+    extract::State,
+    response::{IntoResponse, Json},
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::state::AppState;
-use crate::game::types::GameSettings;
 
 #[derive(Serialize)]
 pub struct CreateGameResponse {

@@ -1,13 +1,13 @@
+use crate::messages::ClientMessage;
+use crate::state::AppState;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::{State, Path},
-    response::IntoResponse,
+    extract::{Path, State},
     http::StatusCode,
+    response::IntoResponse,
 };
-use crate::state::AppState;
-use crate::messages::ClientMessage;
-use std::sync::Arc;
 use futures::{sink::SinkExt, stream::StreamExt};
+use std::sync::Arc;
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -19,19 +19,30 @@ pub async fn ws_handler(
         None => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    let current_players = handle.player_count.load(std::sync::atomic::Ordering::Relaxed);
+    let current_players = handle
+        .player_count
+        .load(std::sync::atomic::Ordering::Relaxed);
     if current_players >= handle.settings.max_players {
         return StatusCode::FORBIDDEN.into_response(); // 403 if full
     }
 
     let player_id = uuid::Uuid::new_v4();
 
-    tracing::info!("New WebSocket connection: player_id={}, game_id={}", player_id, game_id);
+    tracing::info!(
+        "New WebSocket connection: player_id={}, game_id={}",
+        player_id,
+        game_id
+    );
 
     ws.on_upgrade(move |socket| handle_socket(socket, game_id, player_id, state))
 }
 
-async fn handle_socket(socket: WebSocket, game_id: String, player_id: uuid::Uuid, state: Arc<AppState>) {
+async fn handle_socket(
+    socket: WebSocket,
+    game_id: String,
+    player_id: uuid::Uuid,
+    state: Arc<AppState>,
+) {
     let (mut sender, mut receiver) = socket.split();
 
     let tx = if let Some(tx) = state.get_game_sender(&game_id).await {
