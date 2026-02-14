@@ -308,6 +308,13 @@ impl GameActor {
             return;
         }
 
+        if admin_id == target_id {
+            self.broadcast(ServerMessage::Error {
+                msg: "You cannot kick yourself.".to_string(),
+            });
+            return;
+        }
+
         // Remove player
         if let Some(pos) = self.players.iter().position(|p| p.id == target_id) {
             self.players.remove(pos);
@@ -648,14 +655,14 @@ impl GameActor {
                     player.chips += hand.bet; // Push, return bet
                 }
 
-                hand.bet = 0;
+                // hand.bet = 0; // Keep bet amount for display during Payout
             }
 
             player.status = PlayerStatus::Sitting;
-            player.hands.clear();
+            // player.hands.clear(); // Keep hands for display during Payout
         }
 
-        self.dealer_hand.clear();
+        // self.dealer_hand.clear(); // Keep dealer hand for display during Payout
         self.phase = GamePhase::Payout;
         self.broadcast_state();
     }
@@ -666,7 +673,9 @@ impl GameActor {
 
     fn start_betting_phase(&mut self) {
         self.phase = GamePhase::Betting;
+        self.dealer_hand.clear(); // Clear dealer hand from previous round
         for player in self.players.iter_mut() {
+            player.hands.clear(); // Clear player hands from previous round
             if player.status != PlayerStatus::Spectating
                 && player.status != PlayerStatus::PendingApproval
             {
