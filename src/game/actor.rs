@@ -307,6 +307,8 @@ impl GameActor {
             self.broadcast_state();
         } else if let Some(msg) = error_msg {
             self.send_to(conn_id, ServerMessage::Error { msg: msg.into() });
+            // Force disconnect if reconnect fails (e.g. kicked player trying to rejoin)
+            self.send_to(conn_id, ServerMessage::Kicked);
         }
     }
 
