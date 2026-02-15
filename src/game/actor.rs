@@ -484,6 +484,11 @@ impl GameActor {
                 return;
             }
 
+            if amount <= 0 {
+                self.send_error(player_id, "Bet amount must be greater than zero.");
+                return;
+            }
+
             if player.chips >= amount {
                 player.chips -= amount;
                 player.status = PlayerStatus::Playing;
@@ -520,9 +525,8 @@ impl GameActor {
         let all_ready = self.players.iter().all(|p| {
             !p.is_connected
                 || p.status == PlayerStatus::Playing
-                || p.status == PlayerStatus::PendingApproval // Pending don't count
-            // If someone is Sitting/Spectating, they haven't bet yet.
-            // If we have any 'Sitting' players, we are NOT ready for auto-start.
+                || p.status == PlayerStatus::PendingApproval
+                || p.chips == 0 // Skip players with no chips
         });
 
         if all_ready {
